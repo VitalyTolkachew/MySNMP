@@ -1,0 +1,1855 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Система мониторинга ЛВС</title>
+    <link rel="stylesheet" href="/static/css/bootstrap.min.css">
+    <link rel="stylesheet" href="/static/css/style.min.css">
+    <link rel="stylesheet" href="/static/css/cytoscape-context-menus.css">
+    
+    <style>
+        body, html { height: 100%; margin: 0; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        .wrapper { display: flex; }
+        .tree-panel { padding: 10px; background: #fff; border-right: 2px solid #ddd; overflow-y: hidden; }
+	.main-panel {display: flex !important;flex-direction: column !important;height: 100vh !important;overflow: hidden;}
+        #map-container { flex: 1 1 0% !important;min-height: 50px;position: relative;}
+        /*#history-panel {overflow-y: auto;background: white;border-top: 2px solid #333;}*/
+        #history-panel {min-height: 50px;flex: none !important;display: flex;}
+        #unit-tree {scroll-behavior: smooth;} 
+       
+        /* Кнопки управления справа */
+        .map-toolbar { position: absolute; right: 15px; top: 15px; display: flex; flex-direction: column; gap: 10px; z-index: 1000; }
+        
+        .table-history { font-size: 12px; width: 100%; }
+        .row-critical { background-color: #f8d7da!important; color: #842029; font-weight: bold; }
+        .row-warning { background-color: #cfe2ff!important; color: #084298; }
+        .row-success { background-color: #d1e7dd!important; color: #0f5132; }
+        /* Стили для дерева */
+        .jstree-default .jstree-themeicon { display: none !important; }
+        /* .jstree-anchor { transition: none !important; } */
+        .jstree-anchor {font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif !important; font-size: 14px !important; font-weight: normal !important; letter-spacing: 0.3px;}
+        .jstree-search { background: #fff3cd !important;color: #856404 !important;border-radius: 3px;}
+        /* Вертикальный разделитель (между деревом и картой) */
+        #v-resizer {width: 6px;cursor: col-resize;background: #dee2e6;z-index: 1001;flex-shrink: 0;}
+        #v-resizer:hover { background: #0d6efd; }
+        /* Защита от "потери" мыши при быстром движении вправо (над картой) */
+        .resizing #map-container {pointer-events: none !important;}
+        /* Горизонтальный разделитель (между картой и историей) */
+        #h-resizer {height: 8px;cursor: row-resize;background: #dee2e6;flex-shrink: 0;z-index: 1000;}
+        #h-resizer:hover { background: #0d6efd; }
+        #history-panel {flex: 0 0 250px;height: 250px;min-height: 50px;background: white;}
+        .sidebar {overflow-x: hidden;display: flex;flex-direction: column;}
+        .resizing #map-container {pointer-events: none !important;}
+        /* Убираем стандартные бордеры, чтобы разделитель их заменял */
+        .border-end, .border-top { border: none !important; }
+        .resizing {user-select: none;cursor: col-resize;} 
+        .table-history tr {cursor: pointer;user-select: none;transition: background 0.1s;}
+        .table-history tr:hover {background-color: rgba(0,0,0,0.05) !important;}
+        /* Стиль для активной (выбранной одним кликом) строки */
+        .table-history tr.active-row {background-color: #e7f1ff !important;outline: 1px solid #0d6efd;}
+        #alarm-sidebar.active-alarm { background-color: #ff000011 !important; transition: 0.3s; }
+        #alarm-header.active-alarm { background-color: #dc3545 !important; animation: alarm-blink 1s infinite; }
+        @keyframes alarm-blink {0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; }}
+        .alarm-item {border-left: 5px solid #dc3545; cursor: pointer; transition: transform 0.1s; animation: slideIn 0.3s ease-out;}
+        .alarm-item:hover { transform: scale(1.02); background: #fff; }
+        @keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+        body.resizing-active * {user-select: none !important;pointer-events: none !important;}
+        /* Разделители и их родители должны оставаться активными */
+        body.resizing-active #v-resizer,body.resizing-active #h-resizer {pointer-events: auto !important;}
+   </style>
+</head>
+<body>
+
+<!-- ОСНОВНОЙ КОНТЕЙНЕР НА ВЕСЬ ЭКРАН -->
+<div class="d-flex" style="height: 100vh; width: 100vw; overflow: hidden;">
+    
+    <!-- ЛЕВАЯ ПАНЕЛЬ (Дерево + Поиск) -->
+    <div class="sidebar d-flex flex-column border-end shadow-sm" style="width: 320px; background: #fff; overflow-x: hidden;">
+        <div class="p-2 bg-dark text-white fw-bold d-flex justify-content-between align-items-center">
+            <span>Подразделения</span>
+            <span class="badge bg-secondary" id="search-count" style="font-size: 0.7rem;"></span>
+        </div>
+        
+        <!-- Поле поиска (ОСТАВИЛИ ОДНО) -->
+        <div class="p-2 border-bottom bg-light">
+            <input type="text" id="global-search" class="form-control form-control-sm" placeholder="Поиск ...">
+        </div>
+        
+        <!-- Контейнер дерева -->
+        <div id="unit-tree" class="flex-grow-1 p-2" style="overflow-y: auto;"></div>
+    </div>
+
+    <!-- ВЕРТИКАЛЬНЫЙ РАЗДЕЛИТЕЛЬ (для ширины дерева) -->
+    <div id="v-resizer" class="resizer-v"></div>
+
+    <!-- ПРАВАЯ ПАНЕЛЬ (Карта + История) -->
+    <div class="main-panel d-flex flex-column flex-grow-1" style="position: relative; background: #f0f0f0;">
+        
+        <!-- КОНТЕЙНЕР КАРТЫ -->
+        <div id="map-container" class="flex-grow-1" style="position: relative;">
+            <!-- Кнопка НАЗАД -->
+            <div id="map-navigation" style="position: absolute; left: 10px; top: 10px; z-index: 1000;">
+                  <button id="btn-back" class="btn btn-sm btn-light border shadow-sm fw-bold" 
+                          onclick="goBack()" disabled title="Вернуться назад">
+                           ← Назад
+                  </button>
+            </div>
+            <!-- ТУЛБАР (Прижат вправо) -->
+            <div class="map-toolbar d-flex flex-column align-items-end gap-1 p-2" 
+                 style="position: absolute; right: 10px; top: 10px; z-index: 1000; background: rgba(255,255,255,0.7); border-radius: 8px;">
+                
+                <button class="btn btn-sm btn-light border shadow-sm p-1" onclick="tryCreateLinkFromSelection()" title="Создать линию" style="width: 32px; height: 32px;">🔗</button>
+                <button class="btn btn-sm btn-light border shadow-sm p-1" onclick="prepareObjectForm('goto')" title="Создать переход" style="width: 32px; height: 32px;">➡</button>
+                <button class="btn btn-sm btn-light border shadow-sm p-1" onclick="prepareObjectForm('host')" title="Создать узел" style="width: 32px; height: 32px;">🖥</button>
+                
+                <hr class="w-100 my-1 border-secondary">
+                
+                <button class="btn btn-sm btn-light border shadow-sm p-1" onclick="showGroupDirectory()" title="Справочник групп" style="width: 32px; height: 32px;">📂</button>
+ 
+                <!-- <button class="btn btn-sm btn-light border shadow-sm text-primary p-1" onclick="autoLayout('grid')" title="Разложить сеткой" style="width: 32px; height: 32px;">田</button> -->
+                <!-- <button class="btn btn-sm btn-light border shadow-sm text-primary p-1" onclick="autoLayout('cose')" title="Умная расстановка" style="width: 32px; height: 32px;">⚛</button>  -->
+                
+                <small class="text-muted mt-1" style="font-size: 0.6rem; writing-mode: vertical-rl; text-orientation: mixed;">(2 объекта)</small>
+            </div>
+        </div>
+
+        <!-- ГОРИЗОНТАЛЬНЫЙ РАЗДЕЛИТЕЛЬ (для высоты истории) -->
+        <div id="h-resizer" class="resizer-h"></div>
+
+        <!-- ПАНЕЛЬ ИСТОРИИ (Внизу) -->
+        <div id="history-panel" class="border-top bg-white d-flex" style="height: 250px; overflow: hidden;">
+        <!-- ЛЕВАЯ ЧАСТЬ (2/3): Общая история -->
+          <div class="flex-grow-1 border-end d-flex flex-column" style="flex: 3 3 75%; min-width: 0;">
+              <div class="p-1 bg-dark text-white d-flex justify-content-between align-items-center small">
+                  <span class="ps-2 fw-bold">📜 Журнал событий (все)</span>
+                  <span id="history-status" class="pe-2 small opacity-75"></span>
+              </div>
+              <div class="flex-grow-1 overflow-auto">
+                  <table class="table table-sm table-bordered table-history mb-0">
+                      <thead class="table-light sticky-top">
+                          <tr><th style="width: 180px">Время</th><th style="width: 200px">Объект</th><th>Событие</th></tr>
+                      </thead>
+                      <tbody id="history-table-body"></tbody>
+                  </table>
+              </div>
+          </div>
+      
+          <!-- ПРАВАЯ ЧАСТЬ (1/3): Активные критические аварии -->
+           <div id="alarm-sidebar"
+       
+        class="bg-light d-flex flex-column shadow-sm" style="flex: 1 1 25%; min-width: 0px;overflow: hidden;">
+               <div id="alarm-header" class="p-1 bg-secondary text-white fw-bold d-flex justify-content-between align-items-center">
+                   <span class="ps-2">⚠️ АКТИВНЫЕ АВАРИИ <span id="alarm-count" class="badge bg-white text-dark ms-1">0</span></span>
+                   <button id="btn-stop-siren" class="btn btn-xs btn-danger py-0 px-2 d-none" onclick="stopAlarm()" style="font-size: 11px; font-weight: bold;">ВЫКЛ. ЗВУК</button>
+               </div>
+               <div id="alarm-list-container" class="flex-grow-1 overflow-auto p-2" style="background: #fff5f5;">
+                   <div id="alarm-list-placeholder" class="text-muted text-center pt-5 small">Критических сбоев нет</div>
+                   <div id="alarm-live-list"></div>
+               </div>
+           </div>
+       </div>
+      
+       <!-- Аудио-файлы (static/sounds/) -->
+       <audio id="snd-beep" src="/static/sounds/beep.mp3" preload="auto"></audio>
+       <audio id="snd-siren" src="/static/sounds/siren.mp3" preload="auto" loop></audio>
+       </div>
+  </div>
+
+<!-- Модальное окно -->
+<div class="modal fade" id="modalWindow" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="modalTitle">Свойства</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="modalBody"></div>
+        </div>
+    </div>
+</div>
+<script src="/static/js/jquery.min.js"></script>
+<script src="/static/js/bootstrap.bundle.min.js"></script>
+<script src="/static/js/jstree.min.js"></script>
+<script src="/static/js/cytoscape.min.js"></script>
+<script src="/static/js/cytoscape-context-menus.js"></script>
+
+<script>
+    // --- 1. нициализация Карты ---
+    let currentUnitId = null;
+    let linkSource = null;
+    let selectedNodesForLink = []; // Массив для хранения выделенных узлов
+    let linkNodes = []; // Храним два выбранных узла
+    let pingInterval = null;
+    let mapHistoryStack = []; // Стек для хранения истории ID подразделений 
+    let isNavigatingHistory = false; // Флаг: идем ли мы по истории прямо сейчас
+    let activeAlarms = {}; // Храним { "n123": true }
+    let lastProcessedTime = new Date();
+    let sirenTimer = null;
+
+
+    var cy = cytoscape({
+        container: document.getElementById('map-container'),
+        boxSelectionEnabled: true,       // Разрешает рамку (Shift + мышь)
+        autounselectify: false,          // Позволяет снимать выделение кликом в пустоту
+        autoungrabify: false,            // Убедитесь, что это FALSE (позволяет двигать узлы)
+        selectionType: 'single',         // 'single' + Ctrl/Shift — самый стабильный режим
+          style: [
+            { selector: 'node', 
+              style: { 
+                'label': 'data(label)', 
+                'shape': 'data(shape)',
+                'width': 65, 
+                'height': 65, 
+                'shape': 'data(shape)', 
+                'background-color': 'data(color)', // Закрашиваем всю фигуру цветом статуса
+                'background-opacity': 1,         // Делаем фон чуть прозрачным для мягкости
+                // НАСТРОЙКА ИКОНКИ ВНУТРИ
+                'background-image': 'data(icon)',
+                'background-fit': 'none',
+                'background-width': '65%',         // Уменьшаем иконку, чтобы был виден цветной фон
+                'background-height': '65%',
+                'background-clip': 'node',
+                 // РАМКА
+                'border-width': 4,
+                'border-color': '#444',            // Темная тонкая обводка для четкости границ
+                'border-opacity': 0.8,
+                // Подпись
+                'label': 'data(label)',
+                'font-size': '12px',
+                'text-valign': 'bottom',
+                'text-margin-y': 10,
+                'text-background-opacity': 0.8,
+                'text-background-color': '#ffffff',
+                'text-background-padding': '2px'
+            }},
+
+            { selector: 'node[icon][icon != ""]', 
+              style: { 
+                'background-image': 'data(icon)', 
+                'background-fit': 'none', 
+                'background-clip': 'node', 
+                'background-color': 'data(color)', // Закрашиваем всю фигуру цветом статуса
+                'background-opacity': 1,         // Делаем фон чуть прозрачным для мягкости
+                'border-width': 1,
+                'border-color': '#444',            // Темная тонкая обводка для четкости границ
+                'border-opacity': 1,
+            }},
+            {selector: 'node.selected-node',
+                style: {
+                    'border-width': 4,
+                    'border-color': '#0d6efd', // Синий цвет выделения
+                    'border-opacity': 1,
+                    'background-color': '#e7f1ff'
+                }
+            },
+            {
+                selector: 'node:selected',            
+                style: {
+                    'border-width': 4,
+                    'border-color': '#0d6efd', 
+                    'border-opacity': 1,
+                    'background-color': '#e7f1ff'
+                }
+            },
+            // Стиль для узла, выбранного для линка                      
+            {selector: 'node.link-source',
+                style: {
+                    'border-width': 8,
+                    'border-color': '#adb5bd', // Толстая серая рамка
+                    'border-opacity': 0.8
+                }
+            },
+            { selector: 'edge',
+              style: {
+                'width': function(ele) {const s = ele.data('speed');if (s >= 1000) return 4;if (s >= 100) return 2;return 1;},
+                'line-color': function(ele) {return ele.data('status') === 'up' ? '#28a745' : '#dc3545'},
+                'curve-style': 'bezier',
+                'label': 'data(label)',
+                'font-size': '13px',
+               // 'font-weight': 'bold', // Сделали шрифт жирным для лучшей читаемости
+                'text-background-opacity': 1,
+                'text-background-color': '#ffffff',
+                'target-arrow-shape': 'none',
+                'target-arrow-color': '#adb5bd',     
+                'target-arrow-shape': 'none', // Убрано (было triangle)
+                'source-arrow-shape': 'none'  // Гарантируем отсутствие стрелок с обеих сторон
+             }},
+             {
+                 selector: 'edge:selected',
+                 style: {
+                     'line-color': '#0d6efd',
+                     'width': 6
+                 }
+             },
+             // Стиль для временного пунктирного линка
+             {selector: 'edge.temp-link',
+                 style: {
+                     'label': '', 
+                     'width': 2,
+                     'line-color': '#adb5bd',
+                     'line-style': 'dashed',
+                     'curve-style': 'bezier',
+                     'target-arrow-shape': 'none',
+                     'events': 'no'
+                 }
+  
+             },
+             {
+                  selector: 'node[status = "unknown"]',
+                  style: {
+                      'border-color': '#adb5bd', // Серый цвет
+                      'border-width': 4
+                  }
+             },
+             {
+                  selector: 'node[status = "up"]',
+                  style: { 'border-color': '#28a745' }
+              },
+              {
+                   selector: 'edge[status = "unknown"]',
+                   style: { 'line-color': '#adb5bd', // Серый цвет
+              }
+              },
+              {
+                  selector: 'edge[status = "up"]',
+                  style: { 'line-color': '#28a745' }
+              },
+              {
+                  selector: 'edge[status = "down"]',
+                  style: { 'line-color': '#dc3545' }
+              }
+        ]
+    });
+
+    // --- 2. Дерево (jsTree) ---
+    $('#unit-tree').jstree({
+    'core': { 
+        'data': { 'url': '/api/tree', 'dataType': 'json' }, 
+        'themes': { 'dots': true, 'icons': false },
+        'check_callback': true // Обязательно для работы контекстного меню
+    },
+    'plugins': ["search", "state", "sort", "contextmenu"], // Добавлен contextmenu
+    'contextmenu': {
+        'items': function(node) {
+            return {
+                "Create": {
+                    "label": "Добавить подразделение",
+                    "action": function (obj) {
+                        const newName = prompt("Название нового подразделения:", "Новый отдел");
+                        if (newName) createUnit(node.id, newName);
+                    }
+                },
+                "Rename": {
+                    "label": "Переименовать",
+                    "action": function (obj) {
+                        const newName = prompt("Новое название:", node.text);
+                        if (newName && newName !== node.text) renameUnit(node.id, newName);
+                    }
+                },
+                "Delete": {
+                   "label": "Удалить подразделение (РЕКУРСИВНО)",
+                   "separator_before": true,
+                   "action": function (obj) {
+                       const msg = `ВНИМАНИЕ!\nВы удаляете подразделение "${node.text}".\n\n` +
+                                   `Это приведет к УДАЛЕНИЮ:\n` +
+                                   `- Всех вложенных подразделений\n` +
+                                   `- Всех хостов и линков внутри них\n\n` +
+                                   `Вы уверены, что хотите продолжить?`;
+                       
+                       if (confirm(msg)) {
+                           // Второе проверочное подтверждение для безопасности
+                           if (confirm("ПОДТВЕРДИТЕ ЕЩЕ РАЗ: Данные будут стерты навсегда!")) {
+                               deleteUnit(node.id);
+                           }
+                       }
+                   }
+                }                    
+            };
+        }
+    }
+}).on("changed.jstree", function (e, data) {
+    if (data.selected.length) {
+        const newUnitId = data.selected[0];
+        
+        // КЛЮЧЕВОЕ УСЛОВИЕ:
+        // 1. У нас есть старый ID
+        // 2. Мы НЕ находимся в режиме "Назад" (isNavigatingHistory === false)
+        // 3. Мы действительно переходим в другое подразделение
+        if (currentUnitId && !isNavigatingHistory && String(currentUnitId) !== String(newUnitId)) {
+            console.log("Запись в историю:", currentUnitId);
+            mapHistoryStack.push(currentUnitId);
+            
+            if (mapHistoryStack.length > 50) mapHistoryStack.shift();
+            updateBackButtonState();
+        }
+
+        loadMap(data.selected[0]); 
+    }
+});
+
+    $('#tree-search').keyup(function () { $('#unit-tree').jstree(true).search($(this).val()); });
+
+// Функции-помощники для связи с бэкендом (app.py)
+function createUnit(parentId, name) {
+    fetch('/api/unit/add', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ parent_id: parentId, label: name })
+    }).then(() => $('#unit-tree').jstree(true).refresh());
+}
+
+function renameUnit(id, name) {
+    fetch('/api/unit/rename', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ id: id, label: name })
+    }).then(() => $('#unit-tree').jstree(true).refresh());
+}
+
+function deleteUnit(id) {
+    fetch(`/api/unit/delete/${id}`, { method: 'DELETE' })
+    .then(() => {
+        $('#unit-tree').jstree(true).refresh();
+        cy.elements().remove(); 
+    });
+}
+
+// Глобальная функция расчета цвета (ЕДИНАЯ ЛОГИКА)
+function calculateNodeColor(d) {
+    // 1. Приоритет: Мониторинг отключен (Период 0)
+    if (parseInt(d.ping_period) === 0) return "#808080"; // Серый
+    
+    // 2. Объект доступен
+    if (d.status === 'up') return "#5cd65c"; // Зеленый
+    
+    // 3. Объект новый/неизвестен
+    if (d.status === 'unknown') return "#adb5bd"; // Светло-серый
+    
+    // 4. Объект упал (Проверка на критичность)
+    const isCrit = (d.is_critical === true || d.is_critical === "true");
+    return isCrit ? "#ff4d4d" : "#4d94ff"; // Красный или Синий
+}
+
+
+
+    // --- 3. Загрузка карты ---
+    function loadMap(unitId) {
+    currentUnitId = unitId; // СОХРАНЯЕМ ID для таймера
+    fetch('/api/map/' + unitId).then(res => res.json()).then(data => {
+        const tree = $('#unit-tree').jstree(true);
+        const allNodes = tree.get_json('#', { flat: true });
+        const processed = data.map(el => {
+            if (el.data && el.data.id && el.data.id.startsWith('n')) {
+                let d = el.data;
+                let gNum = parseInt(d.group, 10) || 0;
+                //Переходы красим в цвет узла дерева перехода
+                if (el.data && el.data.type === 'goto') {
+                     // Ищем узел дерева по тексту из поля address
+                     const targetNode = allNodes.find(n => n.text.trim() === (d.address || "").trim());
+                     if (targetNode) {
+                         // Берем реальный DOM-элемент узла дерева, чтобы узнать его цвет
+                         const liElement = document.getElementById(targetNode.id);
+                         if (liElement) {
+                             const anchor = liElement.querySelector('.jstree-anchor');
+                            // d.color = anchor ? anchor.style.color : "gray";
+                             d.color = "gray"; // Пока все переходы красим серым 
+                         }
+                     } else {
+                         d.color = "black"; // Если по названию ничего не нашли
+                     }
+                     // 2. Иконка для переходов (если не задана в базе)
+                     if (!d.icon || d.icon.includes('undefined')) { d.icon = "/static/bitmaps/asb.png";}
+                 }
+                 else {
+                    // Обычная логика для хостов
+                    d.color = calculateNodeColor(d);
+                 }
+            }
+            return el;
+        });
+        cy.elements().remove();
+        cy.add(processed);
+        cy.layout({ name: 'preset' }).run();
+        // Сбрасываем флаг ТОЛЬКО после того, как карта реально обновилась
+        if (isNavigatingHistory) {
+            console.log("Навигация по истории завершена для unit:", unitId);
+            isNavigatingHistory = false;
+        }
+    })
+    .catch(err => {
+            console.error("Ошибка загрузки карты:", err);
+            isNavigatingHistory = false; // Сбрасываем и при ошибке, чтобы не заклинило
+        });
+    }   
+ //Функция обновления окраски
+  function refreshMapStatuses() {
+
+    if (typeof currentUnitId === 'undefined' || currentUnitId === null) { return; }
+    if (!cy) return; // Если карта еще не инициализирована
+
+    fetch('/api/map/' + currentUnitId)
+        .then(r => r.json())
+        .then(elements => {
+            elements.forEach(newData => {
+                const el = cy.getElementById(newData.data.id);
+                if (el.length > 0) {
+                    let d = newData.data;
+                    let newColor = "#5cd65c"; // По умолчанию зеленый (up)
+
+                    // ЛОГИКА ПЕРЕСЧЕТА ЦВЕТА
+                    newColor = calculateNodeColor(newData.data);
+
+                    // ПРИМЕНЯЕМ ДАННЫЕ К КАРТЕ
+                    // Cytoscape увидит изменение 'color' и сам перекрасит фон background-color: data(color)
+                    if (el.data('status') !== d.status || el.data('color') !== newColor) {
+                        el.data({
+                            'status': d.status,
+                            'color': newColor
+                        });
+                        console.log(`Объект ${d.label} обновлен: ${d.status} (${newColor})`);
+                    }
+                }
+            });
+        })
+        .catch(err => console.error("Ошибка автообновления:", err));
+  }
+
+
+
+
+
+    // --- 4. РЕДАКТРОВАНЕ (showEditForm) ---
+function showEditForm(id) {
+    const n = cy.getElementById('n' + id);
+    if (!n.length) return;
+
+    const d = n.data();
+
+    // Загружаем всё разом
+    Promise.all([
+        fetch('/api/get_bitmaps').then(r => r.json()),
+        fetch('/api/get_all_subnets').then(r => r.json()),
+        fetch('/api/groups').then(r => r.json())
+    ]).then(([bitmaps, subnets, groups]) => {
+        // --- ВСЯ ЛОГИКА ТЕПЕРЬ СТРОГО ВНУТРИ ЭТОГО БЛОКА ---
+        
+        const currentIcon = d.icon ? d.icon.split('/').pop() : "";
+        const currentType = d.type;
+        const currentAddr = d.address || "";
+
+        // 1. Формируем опции групп (groups гарантированно определена здесь)
+        const groupOptions = groups.map(g => 
+            `<option value="${g.id}" ${String(g.id) === String(d.group) ? 'selected' : ''}>${g.label} [${g.id}]</option>`
+        ).join('');
+
+        // 2. Вспомогательная функция для адреса
+        const getAddressField = (type, value) => {
+            if (type === 'goto') {
+                return `<select id="ea" class="form-select form-select-sm">
+                    <option value="">-- Выберите подразделение --</option>
+                    ${subnets.map(s => `<option value="${s}" ${s === value ? 'selected' : ''}>${s}</option>`).join('')}
+                </select>`;
+            }
+            return `<input type="text" id="ea" class="form-control form-control-sm" value="${value}" placeholder="192.168.x.x">`;
+        };
+
+        // 3. Собираем HTML
+        let html = `
+            <form id="fullEditForm" class="row g-3">
+                <input type="hidden" id="et" value="${currentType}">
+                <div class="col-md-6">
+                    <label class="small fw-bold">Наименование</label>
+                    <input type="text" id="en" class="form-control form-control-sm" value="${d.label || ''}" required>
+                </div>
+                <div class="col-md-6" id="address-container">
+                    <label class="small fw-bold">${currentType === 'goto' ? 'Целевое подразделение' : 'IP / DNS адрес'}</label>
+                    ${getAddressField(currentType, currentAddr)}
+                </div>
+                <div class="col-md-4">
+                    <label class="small fw-bold">Группа</label>
+                    <select id="eg" class="form-select form-select-sm">
+                        <option value="">-- Без группы --</option>
+                        ${groupOptions}
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="small fw-bold">Период (0-выкл)</label>
+                    <input type="number" id="ep" class="form-control form-control-sm" value="${d.ping_period}">
+                </div>
+                <div class="col-md-4">
+                    <label class="small fw-bold">Иконка</label>
+                    <select id="ei" class="form-select form-select-sm">
+                        <option value="">-- По умолчанию --</option>
+                         ${bitmaps.map(f => `<option value="${f}" ${f == currentIcon ? 'selected' : ''}>${f}</option>`).join('')} 
+                    </select>
+                </div>
+                <div class="col-md-6">
+                    <label class="small fw-bold">SNMP Community</label>
+                    <input type="text" id="ec" class="form-control form-control-sm" value="${d.community || 'public'}">
+                </div>
+                <div class="col-md-6">
+                    <label class="small fw-bold">Тип контроля</label>
+                    <select id="es" class="form-select form-select-sm">
+                        <option value="0" ${String(d.has_snmp) === '0' ? 'selected' : ''}>Только ICMP</option>
+                        <option value="1" ${String(d.has_snmp) === '1' ? 'selected' : ''}>ICMP + SNMP</option>
+                    </select>
+                </div>
+                <div class="col-12">
+                    <textarea id="ed" class="form-control form-control-sm" rows="2" placeholder="Описание">${d.description || ''}</textarea>
+                </div>
+                <div class="col-12 text-end border-top pt-3">
+                    <button type="button" class="btn btn-sm btn-secondary me-2" data-bs-dismiss="modal">Отмена</button>
+                    <button type="submit" class="btn btn-sm btn-primary">Сохранить</button>
+                </div>
+            </form>`;
+
+        $('#modalTitle').text('Свойства объекта: ' + d.label);
+        $('#modalBody').html(html);
+        $('#modalWindow').modal('show');
+
+        // 4. Назначаем события ТОЛЬКО ПОСЛЕ вставки HTML в DOM
+        $('#eg').on('change', function() {
+            const selectedGid = $(this).val();   
+            // Ищем группу в массиве. Приводим оба ID к строке для надежности.
+            const groupData = groups.find(x => String(x.id) === String(selectedGid));
+            //if (groupData && groupData.icon) {
+            //    console.log("Автоподстановка иконки:", groupData.icon);
+                // Устанавливаем значение в селектор иконок #ei
+                // $('#ei').val(groupData.icon);
+            //}
+        });
+
+        $('#fullEditForm').off('submit').on('submit', function(e) {
+            e.preventDefault();
+            const payload = {
+                id: id, label: $('#en').val(), address: $('#ea').val(),
+                type: $('#et').val(), group: $('#eg').val(), icon: $('#ei').val(),
+                ping_period: $('#ep').val(), description: $('#ed').val(),
+                community: $('#ec').val(), has_snmp: $('#es').val()
+            };
+            fetch('/api/update_object', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            }).then(() => {
+                $('#modalWindow').modal('hide');
+                loadMap(currentUnitId);
+            });
+        });
+
+    }).catch(err => {
+        console.error("Критическая ошибка формы:", err);
+        alert("Не удалось загрузить данные справочников.");
+    });
+}
+
+// --- 5. СОЗДАНЕ ОБЪЕКТОВ ---
+function prepareObjectForm(type) {
+    const unitId = $('#unit-tree').jstree('get_selected')[0];
+    if(!unitId) return alert("Выберите подразделение!");
+
+    // 1. Загружаем все необходимые списки (добавлен groups в массив)
+    Promise.all([
+        fetch('/api/get_all_subnets').then(r => r.json()),
+        fetch('/api/get_bitmaps').then(r => r.json()),
+        fetch('/api/groups').then(r => r.json()) 
+    ]).then(([subnets, bitmaps, groups]) => { 
+        
+        const isGoto = (type === 'goto');
+        $('#modalTitle').text(isGoto ? 'Новый переход' : 'Новый узел');
+        
+        // 2. Формируем поле адреса/цели
+        let addrField = isGoto 
+            ? `<select id="an" class="form-select form-select-sm">
+                <option value="">-- Выберите цель --</option>
+                ${subnets.map(name => `<option value="${name}">${name}</option>`).join('')}
+               </select>` 
+            : `<input type="text" id="an" class="form-control form-control-sm" placeholder="192.168.x.x">`;
+        
+        // 3. Формируем список групп из справочника
+        const groupOptions = groups.map(g => 
+            `<option value="${g.id}">${g.label} [${g.id}]</option>`
+        ).join('');
+
+        // 4. Формируем строку HTML
+        let formHtml = `
+            <form id="addObjectForm" class="row g-3">
+                <div class="col-md-6">
+                    <label class="small fw-bold">Наименование</label>
+                    <input type="text" id="ln" class="form-control form-control-sm" required>
+                </div>
+                <div class="col-md-6">
+                    <label class="small fw-bold">${isGoto ? 'Целевое подразделение' : 'IP / DNS адрес'}</label>
+                    ${addrField}
+                </div>
+                <div class="col-md-4">
+                    <label class="small fw-bold">Группа</label>
+                    <select id="gn" class="form-select form-select-sm">
+                        <option value="">-- Выберите группу --</option>
+                        ${groupOptions}
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="small fw-bold">Период (0-выкл)</label>
+                    <input type="number" id="pn" class="form-control form-control-sm" value="${isGoto ? 0 : 0}">
+                </div>
+                <div class="col-md-4">
+                    <label class="small fw-bold">Иконка</label>
+                    <select id="ei" class="form-select form-select-sm">
+                        <option value="">-- По умолчанию --</option>
+                        ${bitmaps.map(f => `<option value="${f}">${f}</option>`).join('')}
+                    </select>
+                </div>
+                <div class="col-md-6">
+                    <label class="small fw-bold">SNMP Community</label>
+                    <input type="text" id="cn" class="form-control form-control-sm" value="public">
+                </div>
+                <div class="col-md-6">
+                    <label class="small fw-bold">Тип контроля</label>
+                    <select id="sn" class="form-select form-select-sm">
+                        <option value="0">Только ICMP (Ping)</option>
+                        <option value="1">ICMP + SNMP</option>
+                    </select>
+                </div>
+
+                <div class="col-12">
+                    <label class="small fw-bold">Описание / Примечания</label>
+                    <textarea id="dn" class="form-control form-control-sm" rows="2"></textarea>
+                </div>
+                <div class="col-12 text-end border-top pt-3">
+                    <button type="button" class="btn btn-sm btn-secondary me-2" data-bs-dismiss="modal">Отмена</button>
+                    <button type="submit" class="btn btn-sm btn-success">Создать объект</button>
+                </div>
+            </form>`;
+
+        // 5. Вывод в модальное окно
+        $('#modalBody').html(formHtml);
+        $('#modalWindow').modal('show');
+
+        // 6. Вешаем обработчик автоподстановки иконки
+        //$('#gn').on('change', function() {
+        //    const gid = $(this).val();
+        //    const g = groups.find(x => String(x.id) === String(gid));
+        //    if (g && g.icon) {
+        //        $('#ei').val(g.icon);
+        //    } else {
+        //         $('#ei').val(""); 
+        //    }
+        //иконку не выбираем. Оставляем по умолчанию. Будет использоваться иконка группы
+            $('#ei').val(""); 
+        //});
+
+        // 7. Обработка отправки формы
+        $('#addObjectForm').off('submit').on('submit', function(e) {
+            e.preventDefault();
+            const selectedIcon = $('#ei').val();
+            const data = { 
+                parent_id: unitId, 
+                label: $('#ln').val(), 
+                address: $('#an').val(), 
+                type: type, 
+                group: $('#gn').val(), 
+                icon: $('#ei').val(), 
+                status: 'unknown',
+                community: $('#cn').val(),
+                has_snmp: $('#sn').val(),
+                description: $('#dn').val(),
+                ping_period: $('#pn').val()
+            };
+
+            fetch('/api/add_object', { 
+                method: 'POST', 
+                headers: {'Content-Type': 'application/json'}, 
+                body: JSON.stringify(data) 
+            })
+            .then(res => res.json())
+            .then(res => {
+                if(res.status === 'ok') {
+                    $('#modalWindow').modal('hide');
+                    loadMap(unitId);
+                    $('#unit-tree').jstree(true).refresh();
+                } else {
+                    alert("Ошибка при добавлении: " + (res.message || "неизвестная ошибка"));
+                }
+            });
+        });
+    }).catch(err => console.error("Ошибка подготовки формы создания:", err));
+}
+    // --- 6. СОЗДАНЕ ЛН ---
+    function createNewLink() {
+    const sel = cy.nodes(':selected');
+    if (sel.length !== 2) return alert("Выберите ровно 2 объекта на карте (используйте Ctrl+Клик)");
+    const unitId = $('#unit-tree').jstree('get_selected');
+    
+    // Получаем ID без префикса 'n' сразу
+    const sourceId = sel[0].id().replace('n','');
+    const targetId = sel[1].id().replace('n','');
+
+    $('#modalTitle').text('Новая линия');
+    $('#modalBody').html(`
+        <input type="text" id="ll" class="form-control mb-3" placeholder="Название (опционально)">
+        <button onclick="saveLink('${sourceId}','${targetId}','${unitId}')" class="btn btn-primary w-100">Создать</button>
+    `);
+    $('#modalWindow').modal('show');
+   }
+
+    function saveLink(s, e, p) {
+        const data = { label: $('#ll').val(), parent_id: p, start_obj_id: s.replace('n',''), end_obj_id: e.replace('n','') };
+        fetch('/api/add_link', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) })
+        .then(() => { $('#modalWindow').modal('hide'); loadMap(p); });
+    }
+
+    // --- 7. Контекстное меню, Пинг, стория ---
+    cy.contextMenus({
+        menuItems: [
+            {
+                id: 'ping',
+                content: 'Проверка (PING)',
+                selector: 'node, edge',
+                onClickFunction: function (event) {
+                    const target = event.target;
+                    const addr = target.data('address');
+                    const label = target.data('label');
+                    if (target.type === 'goto') {
+                      alert("Это объект перехода (ссылка). Пинг невозможен.");
+                      return;
+                    }   
+                    if (!addr || addr.trim() === "") {
+                        alert(`Ошибка: У объекта "${label}" не указан адрес для проверки!`);
+                        return;
+                    }
+                    startLivePing(addr, label);
+                }
+            },
+            {
+                id: 'history-obj',
+                content: 'История изменений',
+                selector: 'node, edge',
+                onClickFunction: function (event) {
+                    const id = event.target.id().replace(/[nl]/, '');
+                    showObjectHistory(id, event.target.data('label'));
+                }
+            },
+            { id: 'edit', content: 'Параметры', selector: 'node', onClickFunction: (e) => setTimeout(()=>showEditForm(e.target.id().replace('n','')), 100) },
+            { id: 'delete', 
+                  content: 'Удалить объект', 
+                  selector: 'node', 
+                  onClickFunction: function(event) {
+                      const node = event.target;
+                      const objId = node.id().replace('n', '');
+                      const label = node.data('label');
+              
+                      if (confirm(`Вы уверены, что хотите полностью удалить объект "${label}"?\nВсе связанные с ним линии также будут удалены.`)) {
+                          fetch('/api/delete_object/' + objId, { method: 'DELETE' })
+                          .then(res => res.json())
+                          .then(data => {
+                              if (data.status === 'ok') {
+                                  // Удаляем узел и все связанные с ним ребра (edges) прямо на карте
+                                  cy.remove(node); 
+                                  console.log(`Объект ${label} успешно удален`);
+                              } else {
+                                  alert("Ошибка при удалении: " + data.message);
+                              }
+                          })
+                          .catch(err => alert("Ошибка сети при удалении"));
+                      }
+                  } 
+             },
+             { 
+              id: 'edit-link', 
+              content: 'Параметры связи', 
+              selector: 'edge:not(.temp-link)', 
+              onClickFunction: function(event) {
+                  const edge = event.target;
+                  const id = edge.id().replace('l','');
+                  const d = edge.data(); // Получаем текущие данные из объекта на карте
+          
+                  $('#modalTitle').text('Свойства связи: ' + (d.label || 'Link'));
+                  $('#modalBody').html(`
+                      <form id="editLinkForm" class="row g-3">
+                          <div class="col-md-6">
+                              <label class="small fw-bold">Наименование</label>
+                              <input type="text" id="eln" class="form-control form-control-sm" value="${d.label || ''}">
+                          </div>
+                          <div class="col-md-6">
+                              <label class="small fw-bold">Скорость линка</label>
+                              <select id="els" class="form-select form-select-sm">
+                                  <option value="10" ${d.speed==10?'selected':''}>10 Mbps</option>
+                                  <option value="100" ${d.speed==100?'selected':''}>100 Mbps</option>
+                                  <option value="1000" ${d.speed==1000?'selected':''}>1 Gbps</option>
+                                  <option value="10000" ${d.speed==10000?'selected':''}>10 Gbps</option>
+                              </select>
+                          </div>
+                          <div class="col-md-6">
+                              <label class="small fw-bold">IP адрес линка</label>
+                              <input type="text" id="ela" class="form-control form-control-sm" value="${d.address || ''}">
+                          </div>
+                          <div class="col-md-6">
+                              <label class="small fw-bold">Тип контроля</label>
+                              <select id="elst" class="form-select form-select-sm">
+                                  <option value="0" ${d.has_snmp==0?'selected':''}>ICMP (Ping)</option>
+                                  <option value="1" ${d.has_snmp==1?'selected':''}>ICMP + SNMP</option>
+                              </select>
+                          </div>
+                          <div class="col-md-6">
+                              <label class="small fw-bold">Период опроса (сек)</label>
+                              <input type="number" id="elp" class="form-control form-control-sm" value="${d.ping_period || 0}">
+                          </div>
+                          <div class="col-md-6">
+                              <label class="small fw-bold">SNMP Community</label>
+                              <input type="text" id="elc" class="form-control form-control-sm" value="${d.community || 'public'}">
+                          </div>
+                          <div class="col-12">
+                              <label class="small fw-bold">Описание</label>
+                              <textarea id="eld" class="form-control form-control-sm" rows="2">${d.description || ''}</textarea>
+                          </div>
+                          <div class="col-12 text-end border-top pt-3">
+                              <button type="button" class="btn btn-sm btn-secondary me-2" data-bs-dismiss="modal">Отмена</button>
+                              <button type="submit" class="btn btn-sm btn-primary">Сохранить</button>
+                          </div>
+                      </form>
+                  `);
+                  $('#modalWindow').modal('show');
+          
+                  $('#editLinkForm').off('submit').on('submit', function(e) {
+                      e.preventDefault();
+                      const updateData = { 
+                          id: id, 
+                          label: $('#eln').val(), 
+                          address: $('#ela').val(), 
+                          speed: $('#els').val(),
+                          ping_period: $('#elp').val(),
+                          community: $('#elc').val(),
+                          has_snmp: $('#elst').val(),
+                          description: $('#eld').val()
+                      };
+                      
+                      fetch('/api/update_link', { 
+                          method: 'POST', 
+                          headers: {'Content-Type': 'application/json'}, 
+                          body: JSON.stringify(updateData) 
+                      })
+                      .then(r => r.json())
+                      .then(res => {
+                          if(res.status === 'ok') {
+                              $('#modalWindow').modal('hide');
+                              loadMap(currentUnitId); // Обновляем карту без перезагрузки
+                          }
+                      });
+                  });
+              } 
+           },
+
+             {  id: 'delete-link',
+                content: '<span style="color:red">Удалить связь</span>',
+                selector: 'edge', // Меню появится только при клике на линию
+                onClickFunction: function (event) {
+                    const edge = event.target;
+                    const linkId = edge.id().replace('l', ''); // У нас ID линков начинаются с префикса 'l'
+                    const label = edge.data('label') || 'без названия';
+            
+                    if (confirm(`Вы уверены, что хотите удалить связь "${label}"?`)) {
+                        fetch('/api/delete_link/' + linkId, { method: 'DELETE' })
+                        .then(res => res.json())
+                        .then(data => {
+                            if (data.status === 'ok') {
+                                edge.remove(); // Мгновенно удаляем линию с карты без перезагрузки
+                            } else {
+                                alert("Ошибка: " + data.message);
+                            }
+                        })
+                        .catch(err => alert("Ошибка при связи с сервером"));
+                    }
+                }
+             }
+
+   
+        ]
+    });
+
+    function runPing(id) {
+        $('#modalTitle').text('Ping'); $('#modalBody').html('Опрос...'); $('#modalWindow').modal('show');
+        fetch('/api/ping_now/'+id).then(r=>r.json()).then(d=>$('#modalBody').html(`<pre style="background:#000;color:#0f0;padding:10px">${d.output}</pre>`));
+    }
+
+    function deleteObject(node) {
+        if(confirm('Удалить?')) fetch('/api/delete_object/'+node.id().replace('n',''), {method:'DELETE'}).then(()=>node.remove());
+    }
+
+    // Вспомогательные функции
+    function savePos(node) {
+        fetch('/api/save_pos', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ id: node.id().replace('n',''), x: node.position().x, y: node.position().y }) });
+    }
+    cy.on('dragfree', 'node', (e) => savePos(e.target));
+
+function updateHistory() {
+    fetch('/api/history')
+        .then(res => res.json())
+        .then(data => {
+            if (!Array.isArray(data)) return;
+
+            // --- 1. ЛОГИКА МОНИТОРА АКТИВНЫХ АВАРИЙ (ПРАВАЯ ПАНЕЛЬ) ---
+           
+            // Находим все критические объекты, которые сейчас в статусе down
+            const latestStatusMap = {};
+            data.forEach(row => {
+            if (!latestStatusMap[row.obj_id]) { latestStatusMap[row.obj_id] = row; }
+            });
+            // Теперь фильтруем по статусу ТОЛЬКО актуальные состояния
+            const currentCrashes = Object.values(latestStatusMap).filter(row => 
+             row.status === 'down' && row.is_critical && Number (row.ping_period)>0 
+            );
+            const currentCrashIds = currentCrashes.map(row => String(row.obj_id));
+
+            // Удаляем из правой панели те объекты, которые поднялись (исчезли из списка упавших)
+            Object.keys(activeAlarms).forEach(uid => {
+                if (!currentCrashIds.includes(uid)) {
+                    $(`.alarm-item[data-uid="${uid}"]`).fadeOut(300, function() { $(this).remove(); });
+                    delete activeAlarms[uid];
+                }
+            });
+
+            // Добавляем новые критические аварии в правую панель и включаем сирену
+            let hasNewCritical = false;
+            currentCrashes.forEach(row => {
+                if (!activeAlarms[row.obj_id]) {
+                    renderAlarmItem(row); // Функция отрисовки карточки в правую панель
+                    activeAlarms[row.obj_id] = true;
+                    hasNewCritical = true;
+                }
+            });
+
+            // Если появилась хотя бы одна НОВАЯ критическая авария — запускаем сирену
+            if (hasNewCritical) {
+                startAlarm(); 
+            }
+
+            // --- 2. ЛОГИКА ЗВУКА ДЛЯ ОБЫЧНЫХ ОБЪЕКТОВ (СИНИЕ) ---
+            
+            // Проверяем, есть ли новые "синие" падения (появившиеся после последней итерации)
+            const hasNewWarning = data.some(row => {
+                const eventTime = new Date(row.time_full || row.time);
+                return eventTime > lastProcessedTime && row.status === 'down' && !row.is_critical;
+            });
+
+            if (hasNewWarning && !hasNewCritical) {
+                const beep = document.getElementById('snd-beep');
+                if (beep) beep.play().catch(e => {});
+            }
+
+            // Обновляем метку времени последнего события
+            if (data.length > 0) {
+                lastProcessedTime = new Date(data[0].time_full || new Date());
+            }
+
+            // --- 3. ОБНОВЛЕНИЕ ВИЗУАЛЬНОГО СОСТОЯНИЯ ПАНЕЛИ ТРЕВОГИ ---
+            
+            const alarmCount = Object.keys(activeAlarms).length;
+            $('#alarm-count').text(alarmCount);
+
+            if (alarmCount > 0) {
+                $('#alarm-list-placeholder').hide();
+                $('#alarm-header, #alarm-sidebar').addClass('active-alarm');
+                // Кнопка "ВЫКЛ ЗВУК" показывается только если сирена играет (управляется в startAlarm/stopAlarm)
+            } else {
+                $('#alarm-list-placeholder').show();
+                $('#alarm-header, #alarm-sidebar').removeClass('active-alarm');
+                stopAlarm(); // Если всё починилось само — гасим звук
+            }
+
+            // --- 4. ОТРИСОВКА ОБЩЕЙ ТАБЛИЦЫ ИСТОРИИ (ЛЕВАЯ ПАНЕЛЬ) ---
+            
+            const html = data.map(row => {
+                const color = calculateNodeColor(row);
+                
+                const safeName = row.obj_name
+                    .replace(/\\/g, '\\\\') 
+                    .replace(/'/g, "\\'");
+
+                const bg = (row.status === 'down' && row.is_critical) ? 'background-color: rgba(255, 77, 77, 0.05);' : '';
+
+                return `
+                      <tr style="border-left: 5px solid ${color}; ${bg}" 
+                          onclick="selectHistoryRow(this)"
+                          ondblclick="jumpToNode('${row.parent_id}', '${row.obj_id}', '${safeName}')"
+                          title="Двойной клик для перехода к объекту">
+                          <td class="text-muted" style="font-family: monospace; font-size: 12px; width: 130px;">
+                              ${row.time}
+                          </td>
+                          <td style="width: 200px;">
+                              <strong style="font-family: 'Segoe UI', sans-serif;">${row.obj_name}</strong>
+                          </td>
+                          <td style="color: ${color}; font-weight: 700; font-size: 14px; font-family: 'Segoe UI', sans-serif;">
+                              ${row.msg}
+                          </td>
+                      </tr>`;
+            }).join('');
+            
+            $('#history-table-body').html(html);
+        })
+        .catch(err => console.error("Ошибка обновления таблицы истории:", err));
+}
+
+// Вспомогательная функция для отрисовки карточки в правую панель
+function renderAlarmItem(row) {
+    const safeName = row.obj_name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const itemHtml = `
+        <div class="alarm-item card mb-2 shadow-sm" data-uid="${row.obj_id}"
+             ondblclick="jumpToNode('${row.parent_id}', '${row.obj_id}', '${safeName}')">
+            <div class="card-body p-2">
+                <div class="d-flex justify-content-between align-items-start">
+                    <strong class="text-danger small" style="line-height:1.1">${row.obj_name}</strong>
+                    <span class="badge bg-danger p-1" style="font-size: 9px;">DOWN</span>
+                </div>
+                <div class="small text-muted mt-1" style="font-size: 10px;">${row.time}: ${row.msg}</div>
+            </div>
+        </div>`;
+    $('#alarm-live-list').prepend(itemHtml);
+}
+
+
+// Подсветка строки при одиночном клике
+function selectHistoryRow(rowElement) {
+    $('.table-history tr').removeClass('active-row');
+    $(rowElement).addClass('active-row');
+}
+
+
+function silentUpdateTree() {
+    fetch('/api/tree')
+        .then(res => res.json())
+        .then(newData => {
+            newData.forEach(item => {
+                // Используем getElementById, так как он корректно работает с ID, начинающимися с цифр
+                const liElement = document.getElementById(item.id);
+                
+                if (liElement) {
+                    // Находим внутри li ссылку, которую нужно покрасить
+                    const anchor = liElement.querySelector('.jstree-anchor');
+                    
+                    if (anchor && item.li_attr && item.li_attr.style) {
+                        // Извлекаем значение цвета (например, из "color: red" получаем "red")
+                        const colorValue = item.li_attr.style.replace('color:', '').trim();
+                        anchor.style.color = colorValue;
+                        anchor.style.fontWeight = 'normal';
+                        // Если цвет красный или синий, можно добавить жирный шрифт для наглядности
+                        //anchor.style.fontWeight = (colorValue === 'red' || colorValue === 'blue') ? 'bold' : 'normal';
+                    }
+                }
+            });
+        })
+        .catch(err => console.error("Ошибка обновления дерева:", err));
+}
+
+function autoLayout(layoutName) {
+    if (cy.nodes().length === 0) return;
+
+    let options = {
+        name: layoutName,
+        animate: true,
+        animationDuration: 500,
+        padding: 50,
+        stop: function() {
+            // После завершения анимации сохраняем все позиции в базу данных
+            cy.nodes().forEach(node => {
+                savePos(node);
+            });
+            console.log("Новая расстановка сохранена в БД");
+        }
+    };
+   
+
+if (layoutName === 'cose') {
+        options.nodeRepulsion = 4000000;
+        options.idealEdgeLength = 100;
+    }
+
+    cy.layout(options).run();
+}
+
+
+
+function tryCreateLinkFromSelection() {
+    const selectedNodes = cy.nodes('.link-source');
+    
+    if (selectedNodes.length !== 2) {
+        alert("Выберите ровно 2 объекта через CTRL+Клик!");
+        return;
+    }
+
+    const id1 = selectedNodes.eq(0).id().replace('n', '');
+    const id2 = selectedNodes.eq(1).id().replace('n', '');
+
+    showAddLinkFormManual(id1, id2);
+}
+
+
+function showAddLinkFormManual(src, dst) {
+    $('#modalTitle').text('Параметры новой связи');
+    
+    let html = `
+        <form id="manualLinkForm" class="row g-3">
+            <div class="col-md-6">
+                <label class="small fw-bold">Наименование</label>
+                <input type="text" id="mln" class="form-control form-control-sm" >
+            </div>
+            <div class="col-md-6">
+                <label class="small fw-bold">Скорость линка</label>
+                <select id="ml_speed" class="form-select form-select-sm">
+                    <option value="10">10 Mbps (Тонкая)</option>
+                    <option value="100" selected>100 Mbps (Средняя)</option>
+                    <option value="1000">1 Gbps (Толстая)</option>
+                </select>
+            </div>
+            <div class="col-md-6">
+                <label class="small fw-bold">IP адрес линка</label>
+                <input type="text" id="mla" class="form-control form-control-sm">
+            </div>
+            <div class="col-md-6">
+                <label class="small fw-bold">Тип контроля</label>
+                <select id="mls_type" class="form-select form-select-sm">
+                    <option value="0">ICMP (Ping)</option>
+                    <option value="1">ICMP + SNMP</option>
+                </select>
+            </div>
+            <div class="col-md-6">
+                <label class="small fw-bold">Период опроса (сек)</label>
+                <input type="number" id="mlp" class="form-control form-control-sm" value="0">
+            </div>
+            <div class="col-md-6">
+                <label class="small fw-bold">SNMP Community</label>
+                <input type="text" id="mlc" class="form-control form-control-sm" value="public">
+            </div>
+            <div class="col-12">
+                <label class="small fw-bold">Описание</label>
+                <textarea id="mld" class="form-control form-control-sm" rows="2"></textarea>
+            </div>
+            <div class="col-12 text-end border-top pt-3">
+                <button type="button" class="btn btn-sm btn-secondary me-2" onclick="cancelLinkCreation()">Отмена</button>
+                <button type="submit" class="btn btn-sm btn-primary">Создать связь</button>
+            </div>
+        </form>`;
+
+    $('#modalBody').html(html);
+    $('#modalWindow').modal('show');
+
+    $('#manualLinkForm').off('submit').on('submit', function(e) {
+        e.preventDefault();
+        const data = {
+            parent_id: currentUnitId,
+            start_id: src,
+            end_id: dst,
+            label: $('#mln').val(),
+            address: $('#mla').val(),
+            speed: $('#ml_speed').val(),
+            ping_period: $('#mlp').val(),
+            community: $('#mlc').val(), // Бэкенд заберет это в get_community
+            has_snmp: $('#mls_type').val(),
+            description: $('#mld').val()
+         };
+
+        fetch('/api/add_link', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(data)
+        }).then(res => res.json()).then(res => {
+            if (res.status === 'ok') {
+                $('#modalWindow').modal('hide');
+                clearLinkDraft();
+                loadMap(currentUnitId);
+            }
+        });
+    });
+}
+
+
+// Функция для кнопки "Отмена"
+function cancelLinkCreation() {
+    $('#modalWindow').modal('hide');
+    clearLinkDraft(); // Очищаем всё на карте
+    console.log("Создание связи отменено, карта очищена.");
+}
+
+// Очистка выделения
+// Функция полной очистки "черновика" связи
+function clearLinkDraft() {
+    cy.remove('#temp-edge');
+    cy.nodes().removeClass('link-source');
+    if (typeof linkNodes !== 'undefined') linkNodes = [];
+}
+
+//Обработка двойного клика 
+cy.on('dblclick', 'node', function(evt){
+    const data = evt.target.data();
+    const typeID = Number(data.group)
+    // Проверяем типы объектов (23 - коммутатор, 1 - маршрутизатор)
+    if (typeID === 23 || typeID === 1) {
+        const ip = data.address;
+        console.log(`--- Двойной щелчек --- Объект ${data.group}`);
+        // Браузер поймет, что нужно передать этот адрес в вашу программу
+        window.location.href = `mypatty://${ip}`;
+
+    }
+});
+
+// Обработка клика по фону или линку
+cy.on('tap', function(evt) {
+    // Проверяем: кликнули именно по фону карты (не по узлу и не по линку)
+    // И клик НЕ был совершен с зажатым CTRL
+    if (evt.target === cy && !evt.originalEvent.ctrlKey) {
+        
+        // КЛЮЧЕВОЕ: Проверяем, не является ли целью клика (DOM-элементом) кнопка или форма
+        // Если клик поймал Cytoscape, но в реальности мы нажали на кнопку тулбара - игнорируем
+        const domTarget = evt.originalEvent.target;
+        if (domTarget.tagName === 'BUTTON' || domTarget.closest('.map-toolbar') || domTarget.closest('.modal')) {
+            console.log("--- КЛИК ПО ИНТЕРФЕЙСУ (Игнорируем сброс) ---");
+            return;
+        }
+
+        console.log("--- СБРОС ВЫДЕЛЕНИЯ (Клик в пустоту) ---");
+        clearLinkDraft();
+    }
+});
+
+cy.on('tap', 'node', function(evt) {
+    const node = evt.target;
+    const d = node.data();
+    const isCtrl = evt.originalEvent.ctrlKey;
+
+    if (isCtrl) {
+        // --- ЛОГИКА СОЗДАНИЯ ЛИНКОВ (CTRL зажат) ---
+        node.toggleClass('link-source');
+        const currentSelected = cy.nodes('.link-source');
+
+        if (currentSelected.length === 2) {
+            const id1 = currentSelected.eq(0).id();
+            const id2 = currentSelected.eq(1).id();
+
+            // ПРОВЕРКА: Есть ли реальная связь (НЕ temp-edge)
+            const realLinkExists = cy.edges().filter(edge => {
+                if (edge.id() === 'temp-edge') return false;
+                const s = edge.data('source'), t = edge.data('target');
+                return (s === id1 && t === id2) || (s === id2 && t === id1);
+            }).length > 0;
+
+            //if (realLinkExists) {
+            //    alert("Ошибка: Связь между этими объектами уже существует!");
+            //    node.removeClass('link-source'); // Снимаем выделение со второго узла
+            //    return;
+            //}
+
+            // Если всё ок — рисуем пунктир
+            cy.remove('#temp-edge');
+            cy.add({
+                group: 'edges',
+                data: { id: 'temp-edge', source: id1, target: id2, label: '' },
+                classes: 'temp-link'
+            });
+        } else {
+            // Если узлов не 2 (1 или 0 после снятия) — убираем пунктир
+            cy.remove('#temp-edge');
+        }
+    } else {
+        // --- ЛОГИКА ПЕРЕХОДА (Обычный клик) ---
+        if (d.type === 'goto') {
+            const targetName = d.address; // Берем название из поля адрес
+            
+            if (!targetName || targetName.trim() === "") {
+                alert("Ошибка: Поле 'Адрес' пустое. Укажите название подразделения в параметрах.");
+                return;
+            }
+
+            const tree = $('#unit-tree').jstree(true);
+            if (!tree) return;
+
+            const allNodes = tree.get_json('#', { flat: true });
+            // Ищем узел, у которого текст совпадает с адресом объекта GOTO
+            const foundNode = allNodes.find(n => n.text.trim() === targetName.trim());
+
+            if (foundNode) {
+                console.log(`Переход в подразделение: ${foundNode.text} (ID: ${foundNode.id})`);
+                tree.deselect_all();
+                tree.select_node(foundNode.id); 
+                
+
+// Событие changed.jstree само вызовет loadMap(foundNode.id)
+            } else {
+                alert(`Ошибка перехода: Подразделение с названием "${targetName}" не найдено в дереве.\n\nПроверьте точность написания.`);
+            }
+        }
+    }
+});
+
+// Переход Goto
+//    cy.on('tap', 'node', function(evt){
+//        const n = evt.target;
+//        if(n.data('type') === 'goto' && n.data('address')){
+//            const tree = $('#unit-tree').jstree(true);
+//            const target = tree.get_json('#', {flat:true}).find(i => i.original && (i.original.address === n.data('address') || i.id === n.data('address')));
+//            if(target) { tree.deselect_all(); tree.select_node(target.id); }
+//        }
+//    });
+
+// --- ЛОГИКА ВЕРТИКАЛЬНОГО РАЗДЕЛИТЕЛЯ ---
+// --- ОБЩИЕ ПЕРЕМЕННЫЕ ---
+const sidebar = document.querySelector('.sidebar');
+const vResizer = document.getElementById('v-resizer');
+const historyPanel = document.getElementById('history-panel');
+const hResizer = document.getElementById('h-resizer');
+const mainPanel = document.querySelector('.main-panel');
+
+// --- ВЕРТИКАЛЬНЫЙ РАЗДЕЛИТЕЛЬ (Ширина дерева) ---
+vResizer.addEventListener('mousedown', function(e) {
+    e.preventDefault();
+    document.body.classList.add('resizing-active'); // Включаем блокировку
+    document.body.style.cursor = 'col-resize';
+    document.addEventListener('mousemove', resizeV);
+    document.addEventListener('mouseup', stopResizeV);
+});
+
+function resizeV(e) {
+    const newWidth = e.clientX;
+    if (newWidth > 100 && newWidth < 800) {
+        sidebar.style.width = newWidth + 'px';
+        sidebar.style.flex = `0 0 ${newWidth}px`;
+        
+        if (window.cy) window.cy.resize();
+    }
+}
+
+function stopResizeV() {
+    document.body.classList.remove('resizing-active'); // ВЫКЛЮЧАЕМ БЛОКИРОВКУ
+    document.body.style.cursor = 'default';
+    
+    document.removeEventListener('mousemove', resizeV);
+    document.removeEventListener('mouseup', stopResizeV);
+    
+    if (window.cy) window.cy.resize().fit(null, 50);
+}
+
+// --- ГОРИЗОНТАЛЬНЫЙ РАЗДЕЛИТЕЛЬ (Высота истории) ---
+hResizer.addEventListener('mousedown', function(e) {
+    e.preventDefault();
+    document.body.classList.add('resizing-active'); // Включаем
+    document.body.style.cursor = 'row-resize';
+    document.addEventListener('mousemove', resizeH);
+    document.addEventListener('mouseup', stopResizeH);
+});
+
+function resizeH(e) {
+    const rect = mainPanel.getBoundingClientRect();
+    let newHeight = rect.bottom - e.clientY;
+
+    const minH = 50;
+    const maxH = rect.height - 100;
+
+    if (newHeight >= minH && newHeight <= maxH) {
+        historyPanel.style.height = newHeight + 'px';
+        historyPanel.style.flex = `0 0 ${newHeight}px`;
+
+        if (window.cy) window.cy.resize();
+    }
+}
+
+function stopResizeH() {
+    document.body.classList.remove('resizing-active'); // ВЫКЛЮЧАЕМ
+    document.body.style.cursor = 'default';
+    
+    document.removeEventListener('mousemove', resizeH);
+    document.removeEventListener('mouseup', stopResizeH);
+    
+    if (window.cy) window.cy.resize().fit(null, 50);
+}
+
+
+// --- ВОССТАНОВЛЕНИЕ ПРИ ЗАГРУЗКЕ ---
+document.addEventListener('DOMContentLoaded', function() {
+    const savedWidth = localStorage.getItem('monitor-sidebar-width');
+    if (savedWidth) {
+        sidebar.style.width = savedWidth;
+        sidebar.style.flex = `0 0 ${savedWidth}`;
+    }
+
+    const savedHeight = localStorage.getItem('monitor-history-height');
+    if (savedHeight) {
+        historyPanel.style.height = savedHeight;
+        historyPanel.style.flex = `0 0 ${savedHeight}`;
+    }
+});
+
+
+function startLivePing(address, label) {
+    $('#modalTitle').text(`PING: ${label} [${address}]`);
+    $('#modalBody').html(`
+        <div id="ping-console" style="background: #000; color: #ccc; font-family: 'Consolas', monospace; padding: 12px; height: 350px; overflow-y: auto; font-size: 13px; line-height: 1.4;">
+            <div style="color: #888;">Обмен пакетами с ${address} по 32 байт данных:</div>
+        </div>
+    `);
+    $('#modalWindow').modal('show');
+
+    $('#modalWindow').on('hidden.bs.modal', () => { clearInterval(pingInterval); });
+
+    pingInterval = setInterval(() => {
+    fetch(`/api/ping_check?addr=${address}`)
+        .then(r => r.json())
+        .then(data => {const consoleBox = $('#ping-console');
+            const text = data.output;
+            
+            // Раскрашиваем только явно плохие ответы
+            let color = "#ccc";
+            if (text.includes("Превышен") || text.includes("Недоступен") || text.includes("timeout")) {
+                color = "#ff4d4d";
+            } else if (text.includes("время=")) {
+                color = "#0f0";
+            }
+
+            const line = `<div style="color: ${color};">${text}</div>`;
+            consoleBox.append(line);
+            
+            // Автопрокрутка
+            consoleBox.scrollTop(consoleBox.prop("scrollHeight"));
+             });
+     }, 2000);
+}
+function jumpToNode(unitId, nodeId, objName) {
+//    console.log(`--- ПРЫЖОК ---`);
+//    console.log(`Оригинальное имя: ${objName}`);
+
+    if (!unitId || unitId === 'null' || unitId === 'undefined') {
+        // Кодируем имя в Base64, чтобы спецсимволы ( \ / % ) не ломали URL
+        // Используем btoa(unescape(encodeURIComponent(str))) для поддержки кириллицы
+        const b64Name = btoa(unescape(encodeURIComponent(objName)));
+        fetch(`/api/find_object_by_name?b64name=${b64Name}`)
+            .then(r => r.json())
+            .then(res => {
+                if (res.status === 'success') {
+                    executeJump(res.parent_id, res.obj_id);
+                } else {
+                    alert("Объект не найден: " + objName);
+                }
+            });
+    } else {
+        executeJump(unitId, nodeId);
+    }
+}
+
+// Вынесенная логика самого прыжка
+
+function executeJump(unitId, nodeId) {
+    const tree = $('#unit-tree').jstree(true);
+    if (!tree) return;
+
+    const sUnitId = String(unitId);
+    // Гарантируем правильный префикс для Cytoscape (n для узла, l для линка)
+    const sNodeId = (nodeId.startsWith('n') || nodeId.startsWith('l')) ? nodeId : 'n' + nodeId;
+
+    // 1. Переключаем подразделение в дереве
+    tree.deselect_all();
+    tree.select_node(sUnitId);
+    
+    // 2. Скроллим дерево к выбранному узлу
+    setTimeout(() => {
+        const el = document.getElementById(sUnitId);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 200);
+
+    // 3. Умное ожидание появления объекта на карте
+    let attempts = 0;
+    const maxAttempts = 15; // 15 попыток по 400мс = 6 секунд ожидания
+
+    const checkExist = setInterval(() => {
+        attempts++;
+        const targetNode = cy.getElementById(sNodeId);
+
+        // СЛУЧАЙ А: Объект найден
+        if (targetNode.length > 0) {
+            clearInterval(checkExist);
+            performHighlight(sNodeId);
+            return;
+        } 
+
+        // СЛУЧАЙ Б: Первая попытка, а мы еще в старом подразделении — форсируем загрузку
+        if (attempts === 1 && String(currentUnitId) !== sUnitId) {
+            loadMap(sUnitId);
+        }
+
+        // СЛУЧАЙ В: Превышено время ожидания (Объект не найден)
+        if (attempts >= maxAttempts) {
+            clearInterval(checkExist);
+            console.warn(`[JUMP] Объект ${sNodeId} не появился на карте за ${maxAttempts * 400}мс. Возможно, он был удален.`);
+            // Опционально: можно вывести неброское уведомление пользователю
+        }
+    }, 400); // Немного увеличим интервал для снижения нагрузки
+}
+// Подсветка
+function performHighlight(nodeId) {
+    if (!nodeId) return;
+    // Гарантируем префикс n или l
+    const selector = (nodeId.startsWith('n') || nodeId.startsWith('l')) ? nodeId : 'n' + nodeId;
+    const node = cy.getElementById(selector);
+
+    
+
+if (node.length) {
+        cy.animate({
+            center: { eles: node },
+            zoom: 1.4,
+            duration: 1000
+        });
+        // Эффект пульсации
+        node.flashClass('selected-node', 3000);
+       // console.log(`Объект ${selector} успешно подсвечен.`);
+    } else {
+        console.warn(`Объект ${selector} не найден на текущей карте (unitId: ${currentUnitId})`);
+    }
+}
+
+//Глобальный поиск
+
+$('#global-search').keypress(function (e) {
+    if (e.which == 13) { // Нажатие Enter
+        const query = $(this).val().trim();
+        if (query.length < 2) return;
+
+        console.log("Глобальный поиск:", query);
+
+        fetch(`/api/global_search?q=${encodeURIComponent(query)}`)
+            .then(r => r.json())
+            .then(res => {
+                if (res.status === 'success') {
+                    // Используем нашу "бронебойную" функцию перехода
+                    executeJump(res.parent_id, res.obj_id);
+                    
+                    // Небольшое уведомление в консоль или статус-бар
+                    console.log(`Найдено: ${res.label} в подразделении ${res.parent_id}`);
+                } else {
+                    alert("Объект с таким IP или Именем не найден.");
+                }
+            })
+            .catch(err => console.error("Ошибка поиска:", err));
+    }
+});
+
+
+
+// Просмотр истории 
+
+function showObjectHistory(objId, label) {
+    $('#modalTitle').text(`История: ${label}`);
+    $('#modalBody').html('<div class="text-center p-3">Загрузка данных...</div>');
+    
+    fetch(`/api/object_history/${objId}`)
+        .then(r => r.json())
+        .then(data => {
+            let html = `
+                <table class="table table-sm table-hover mb-0">
+                    <thead class="table-light">
+                        <tr><th style="width:30%">Время</th><th>Событие</th></tr>
+                    </thead>
+                    <tbody>`;
+            
+            data.forEach(h => {
+                // ИСПОЛЬЗУЕМ ФУНКЦИЮ ЦВЕТА
+                const color = calculateNodeColor(h);
+                const isDown = h.status === 'down';
+                
+                html += `
+                    <tr style="border-left: 5px solid ${color};">
+                        <td class="text-muted small">${h.time}</td>
+                        <td style="color: ${color}; font-weight: ${isDown ? 'bold' : 'normal'};">
+                            ${h.event}
+                        </td>
+                    </tr>`;
+            });
+            
+            html += '</tbody></table>';
+            $('#modalBody').html(html);
+            $('#modalWindow').modal('show');
+        })
+        .catch(err => $('#modalBody').html('<div class="alert alert-danger">Ошибка загрузки</div>'));
+}
+    // Размещаем в самом низу, чтобы он начал работать после загрузки страницы
+    $(document).ready(function() {
+        $(document).one('click', function() {
+        const siren = document.getElementById('snd-siren');
+        const beep = document.getElementById('snd-beep');
+        if (siren) siren.load();
+        if (beep) beep.load();
+        
+        console.log("🔊 Аудио-система активирована пользователем");
+
+        // 2. Если на момент клика уже есть активные аварии — включаем сирену СРАЗУ
+        if (Object.keys(activeAlarms).length > 0) {
+            startAlarm();
+        }
+    });
+        updateHistory();
+        setInterval(refreshMapStatuses, 10000);
+        setInterval(updateHistory, 10000);
+        setInterval(silentUpdateTree, 30000);
+    });
+
+
+
+// Функция перехода НАЗАД
+function goBack() {
+    if (mapHistoryStack.length === 0) return;
+
+    // Извлекаем последний ID из стека
+    const previousUnitId = mapHistoryStack.pop();
+    
+    // Включаем режим навигации по истории
+    isNavigatingHistory = true; 
+
+    const tree = $('#unit-tree').jstree(true);
+    tree.deselect_all();
+    tree.select_node(previousUnitId); 
+    updateBackButtonState();
+}
+
+// Обновление состояния кнопки
+function updateBackButtonState() {
+    const btn = document.getElementById('btn-back');
+    if (mapHistoryStack.length > 0) {
+        btn.disabled = false;
+        btn.classList.replace('btn-light', 'btn-primary');
+    } else {
+        btn.disabled = true;
+        btn.classList.replace('btn-primary', 'btn-light');
+    }
+}
+
+
+
+function showGroupDirectory() {
+    $('#modalTitle').text('Справочник групп объектов');
+    Promise.all([
+        fetch('/api/groups').then(r => r.json()),
+        fetch('/api/get_bitmaps').then(r => r.json()),
+        fetch('/api/get_shapes').then(r => r.json())
+    ]).then(([groups, bitmaps, shapes]) => {
+        let html = `
+            <div class="table-responsive" style="max-height: 500px;">
+                <table class="table table-sm align-middle small">
+                    <thead class="table-dark">
+                        <tr><th>ID(Код)</th><th>Имя группы</th><th>Иконка по умолч.</th><th>Фигура</th><th>Крит.</th><th>Действие</th></tr>
+                    </thead>
+                    <tbody>
+                        ${groups.map(g => renderGroupRow(g, bitmaps, shapes)).join('')}
+                        <tr class="table-info">
+                            <td><input type="text" id="new-gid" class="form-control form-control-sm" placeholder="Код"></td>
+                            <td><input type="text" id="new-gn" class="form-control form-control-sm" placeholder="Имя"></td>
+                            <td><select id="new-gi" class="form-select form-select-sm">${renderIconOpts(bitmaps)}</select></td>
+                            <td><select id="new-gs" class="form-select form-select-sm">${renderShapeOpts(shapes)}</select></td>
+                            <td class="text-center"><input type="checkbox" id="new-gc"></td>
+                            <td><button class="btn btn-sm btn-success w-100" onclick="saveGroupRow(null)">+</button></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>`;
+        $('#modalBody').html(html);
+        $('#modalWindow').modal('show');
+    });
+}
+
+function renderGroupRow(g, bitmaps, shapes) {
+    return `
+        <tr data-id="${g.id}">
+            <td><b>${g.id}</b></td>
+            <td><input type="text" class="form-control form-control-sm val-label" value="${g.label}"></td>
+            <td><select class="form-select form-select-sm val-icon">${renderIconOpts(bitmaps, g.icon)}</select></td>
+            <td><select class="form-select form-select-sm val-shape">${renderShapeOpts(shapes, g.shape)}</select></td>
+            <td class="text-center"><input type="checkbox" class="val-crit" ${g.is_critical ? 'checked' : ''}></td>
+            <td>
+                <div class="btn-group">
+                    <button class="btn btn-sm btn-primary" onclick="saveGroupRow('${g.id}')">💾</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteGroupRow('${g.id}')">🗑</button>
+                </div>
+            </td>
+        </tr>`;
+}
+
+function renderIconOpts(list, curr) { return list.map(i => `<option value="${i}" ${i==curr?'selected':''}>${i}</option>`).join(''); }
+function renderShapeOpts(list, curr) { return list.map(i => `<option value="${i}" ${i==curr?'selected':''}>${i}</option>`).join(''); }
+
+function saveGroupRow(id) {
+    const isNew = id === null;
+    const data = {
+        id: isNew ? $('#new-gid').val() : id,
+        label: isNew ? $('#new-gn').val() : $(`tr[data-id="${id}"] .val-label`).val(),
+        icon: isNew ? $('#new-gi').val() : $(`tr[data-id="${id}"] .val-icon`).val(),
+        shape: isNew ? $('#new-gs').val() : $(`tr[data-id="${id}"] .val-shape`).val(),
+        is_critical: isNew ? $('#new-gc').is(':checked') : $(`tr[data-id="${id}"] .val-crit`).is(':checked')
+    };
+    fetch('/api/groups/save', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) })
+    .then(r => r.json()).then(res => {
+        if (res.status === 'ok') {
+            showGroupDirectory(); // Перерисовать таблицу в окне
+            // ПЕРЕЗАГРУЖАЕМ КАРТУ, чтобы применились новые формы/иконки
+            if (currentUnitId) loadMap(currentUnitId); 
+        }
+    });
+}
+
+function deleteGroupRow(id) {
+    if(confirm('Удалить группу?')) fetch(`/api/groups/delete/${id}`, { method: 'DELETE' }).then(() => showGroupDirectory());
+}
+
+function startAlarm() {
+    const siren = document.getElementById('snd-siren');
+    if (!siren) return;
+
+    // Пытаемся запустить звук
+    const playPromise = siren.play();
+
+    if (playPromise !== undefined) {
+        playPromise.then(_ => {
+            // Звук пошел успешно
+            $('#btn-stop-siren').removeClass('d-none');
+            $('#alarm-header, #alarm-sidebar').addClass('active-alarm');
+        }).catch(error => {
+            // Браузер заблокировал звук (ждем клика из п.1)
+            console.warn("⚠️ Звук заблокирован. Нажмите в любом месте страницы для активации сирены.");
+            // Визуальную тревогу все равно показываем!
+            $('#alarm-header, #alarm-sidebar').addClass('active-alarm');
+        });
+    }
+
+    if (sirenTimer) clearTimeout(sirenTimer);
+    sirenTimer = setTimeout(() => { stopAlarm(); }, 60000);
+}
+
+
+/**
+ * Ручное выключение звука (по нажатию на кнопку "ВЫКЛ ЗВУК")
+ */
+function stopAlarm() {
+    const siren = document.getElementById('snd-siren');
+    
+    // Останавливаем звук
+    if (siren) {
+        siren.pause();
+        siren.currentTime = 0;
+    }
+
+    // Очищаем таймер автовыключения
+    if (sirenTimer) {
+        clearTimeout(sirenTimer);
+        sirenTimer = null;
+    }
+
+    // Скрываем кнопку выключения звука
+    $('#btn-stop-siren').addClass('d-none');
+
+    // Убираем визуальную пульсацию (но список объектов остается, пока они DOWN)
+    $('#alarm-header, #alarm-sidebar').removeClass('active-alarm');
+    
+    console.log("Сирена и пульсация отключены пользователем.");
+}
+
+
+
+
+</script>
+</body>
+</html>
